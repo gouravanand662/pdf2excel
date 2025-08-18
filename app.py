@@ -1,28 +1,29 @@
 import streamlit as st
 import pdfplumber
-import camelot
-import pandas as pd
 import re
 import io
+import pandas as pd
 
-st.set_page_config(page_title="PDF to Excel Converter", layout="centered")
-st.title("AI-Powered PDF Bank Statement to Excel Converter (Lightweight)")
-st.write("Upload your bank statement PDF and convert it to Excel automatically.")
+st.set_page_config(page_title="AI PDF to Excel", layout="centered")
+st.title("PDF Bank Statement → Excel Converter")
+st.write("Upload your bank statement PDF and convert it to Excel automatically (Text-based only).")
 
-uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+uploaded_file = st.file_uploader("📂 Upload PDF", type="pdf")
 
+# --- Transaction Parser ---
 def parse_transactions(text):
     transactions = []
-    # Regex pattern: Date, Description, Amount
-    pattern = r"(\d{2,4}[-/]\d{2}[-/]\d{2,4})\s+([A-Za-z0-9\s,.-]+?)\s+([-+]?\d+(?:\.\d{1,2})?)"
+    # Flexible regex for multiple date formats and amounts
+    pattern = r"(\d{1,2}[-/ ]?[A-Za-z]{3}[-/ ]?\d{2,4}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\s+(.+?)\s+([-+]?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)"
     matches = re.findall(pattern, text)
+
     for match in matches:
         date, desc, amount = match
-        amount = float(amount)
+        amount = float(amount.replace(",", ""))
         credit = amount if amount > 0 else 0
         debit = -amount if amount < 0 else 0
         transactions.append({
-            "Date": date,
+            "Date": date.strip(),
             "Description": desc.strip(),
             "Amount": amount,
             "Credit": credit,
@@ -30,48 +31,41 @@ def parse_transactions(text):
         })
     return transactions
 
+
 if uploaded_file is not None:
     st.success("✅ PDF uploaded successfully!")
 
-    method = st.radio("Choose Extraction Method:", ["Table-based", "Text-based"])
+    # Extract text with pdfplumber
+    with pdfplumber.open(uploaded_file) as pdf:
+        full_text = ""
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                full_text += text + "\n"
 
-    final_df = pd.DataFrame()
+    if full_text.strip() == "":
+        st.error("❌ No text detected. Maybe this is a scanned PDF? Try OCR version.")
+    else:
+        st.text_area("📄 Raw Extracted Text", full_text, height=200)
 
-    if method == "Table-based":
-        try:
-            tables = camelot.read_pdf(uploaded_file, pages='all', flavor='stream')
-            if tables:
-                dfs = [table.df for table in tables]
-                final_df = pd.concat(dfs, ignore_index=True)
-                st.success(f"📊 Extracted {len(final_df)} rows from tables!")
-            else:
-                st.warning("⚠️ No tables detected. Try Text-based method.")
-        except Exception as e:
-            st.error(f"❌ Error extracting tables: {e}")
+        # Parse with regex
+        transactions = parse_transactions(full_text)
 
-    else:  # Text-based
-        with pdfplumber.open(uploaded_file) as pdf:
-            full_text = "\n".join([page.extract_text() or "" for page in pdf.pages])
+        if transactions:
+            final_df = pd.DataFrame(transactions)
+            st.success(f"✅ Extracted {len(final_df)} transactions!")
 
-        if full_text.strip() == "":
-            st.error("⚠️ No text detected. Maybe a scanned PDF? Try Table-based method.")
+            # Show extracted transactions
+            st.dataframe(final_df)
+
+            # Download Excel
+            excel_buffer = io.BytesIO()
+            final_df.to_excel(excel_buffer, index=False)
+            st.download_button(
+                label="📥 Download Excel",
+                data=excel_buffer,
+                file_name="transactions.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         else:
-            transactions = parse_transactions(full_text)
-            if transactions:
-                final_df = pd.DataFrame(transactions)
-                st.success(f"📄 Extracted {len(final_df)} transactions!")
-            else:
-                st.error("❌ Could not parse transactions. Try Table-based method.")
-
-    if not final_df.empty:
-        st.dataframe(final_df)
-
-        excel_buffer = io.BytesIO()
-        final_df.to_excel(excel_buffer, index=False)
-
-        st.download_button(
-            label="⬇️ Download Excel",
-            data=excel_buffer,
-            file_name="transactions.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            st.error("❌ Could not parse transactions. Please check the raw text above.")
