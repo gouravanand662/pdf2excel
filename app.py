@@ -1,32 +1,52 @@
 import streamlit as st
 import pdfplumber
 import camelot
-import pytesseract
-from PIL import Image
-import io
-from openai import OpenAI
-import json
 import pandas as pd
+import re
+import io
+from transformers import pipeline
 
-# Streamlit setup
 st.set_page_config(page_title="AI PDF to Excel", layout="centered")
-st.title("AI-Powered PDF to Excel Converter")
-st.write("Upload your bank statement PDF and convert it to Excel automatically.")
+st.title("AI-Powered PDF to Excel Converter (Free Alternative)")
+st.write("Upload your bank statement PDF and convert it to Excel automatically. No OpenAI needed!")
 
-# Initialize OpenAI client
-client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
-
-# File upload
 uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+
+# Load a lightweight Hugging Face model (for text cleanup if needed)
+generator = pipeline("text-generation", model="distilgpt2")
+
+def parse_transactions(text):
+    """
+    Simple regex parser for transactions:
+    - Date formats: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY
+    - Extract Description + Amount
+    """
+    transactions = []
+    pattern = r"(\d{2,4}[-/]\d{2}[-/]\d{2,4})\s+([A-Za-z0-9\s,.-]+?)\s+([-+]?\d+(?:\.\d{1,2})?)"
+    matches = re.findall(pattern, text)
+
+    for match in matches:
+        date, desc, amount = match
+        amount = float(amount)
+        credit = amount if amount > 0 else 0
+        debit = -amount if amount < 0 else 0
+        transactions.append({
+            "Date": date,
+            "Description": desc.strip(),
+            "Amount": amount,
+            "Credit": credit,
+            "Debit": debit
+        })
+    return transactions
 
 if uploaded_file is not None:
     st.success("PDF uploaded successfully!")
 
-    method = st.radio("Choose Extraction Method:", ["Table-based", "Text-based AI"])
+    method = st.radio("Choose Extraction Method:", ["Table-based", "Text-based (Free AI)"])
+
     final_df = pd.DataFrame()
 
     if method == "Table-based":
-        # Extract tables using Camelot
         try:
             tables = camelot.read_pdf(uploaded_file, pages='all', flavor='stream')
             if tables:
@@ -34,12 +54,11 @@ if uploaded_file is not None:
                 final_df = pd.concat(dfs, ignore_index=True)
                 st.success(f"Extracted {len(final_df)} rows from tables!")
             else:
-                st.warning("No tables detected. Try Text-based AI method.")
+                st.warning("No tables detected. Try Text-based method.")
         except Exception as e:
-            st.error(f"Table extraction failed: {e}")
+            st.error(f"Error extracting tables: {e}")
 
     else:
-        # Extract raw text with pdfplumber
         with pdfplumber.open(uploaded_file) as pdf:
             full_text = ""
             for page in pdf.pages:
@@ -48,35 +67,26 @@ if uploaded_file is not None:
                     full_text += text + "\n"
 
         if full_text.strip() == "":
-            st.error("No text detected. Maybe a scanned PDF? Try Table-based or OCR method.")
+            st.error("No text detected. Maybe a scanned PDF? Try Table-based method.")
         else:
-            st.info("Parsing transactions using AI...")
+            st.info("Parsing transactions using regex + HuggingFace model...")
 
-            prompt = f"""
-            Extract all bank transactions from the following text.
-            Each transaction must have Date (YYYY-MM-DD), Description, Amount, Credit, Debit.
-            Return ONLY a JSON array. Example:
-            [
-              {{"Date":"2025-08-15","Description":"ATM Withdrawal","Amount":500,"Credit":0,"Debit":500}}
-            ]
-            Text:
-            {full_text}
-            """
+            # First pass: regex extraction
+            transactions = parse_transactions(full_text)
 
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0
-                )
-                ai_output = response.choices[0].message.content
-                data = json.loads(ai_output)
-                final_df = pd.DataFrame(data)
-                st.success(f"AI extracted {len(final_df)} transactions!")
-            except Exception as e:
-                st.error(f"AI could not parse the PDF. Error: {e}")
+            # If too few transactions, try HuggingFace cleanup
+            if len(transactions) < 3:
+                st.warning("Few transactions detected. Trying HuggingFace model to enhance parsing...")
+                generated = generator(full_text[:1000], max_length=500, do_sample=False)[0]["generated_text"]
+                transactions = parse_transactions(generated)
 
-    # Show extracted dataframe & download option
+            if transactions:
+                final_df = pd.DataFrame(transactions)
+                st.success(f"Extracted {len(final_df)} transactions!")
+            else:
+                st.error("Could not parse transactions. Try Table-based method.")
+
+    # Show dataframe and download option
     if not final_df.empty:
         st.dataframe(final_df)
 
